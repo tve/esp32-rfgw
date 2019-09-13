@@ -12,13 +12,21 @@
 
 //===== I/O pins/devices
 
-SPIClass spi;
-SX1276fsk radio(spi, 25, 27); // ss and reset pins
+#define RF_SS      25
+#define RF_RESET   27
+#define RF_CLK     32
+#define RF_MISO    35
+#define RF_MOSI    33
+#define RF_DIO0    26
+#define RF_DIO4    39
 
-uint8_t rfId = 63; // 61=tx-only node, 63=promisc node
-uint8_t rfGroup = 6;
-uint32_t rfFreq = 912500;
-int8_t rfPow = 10;
+SPIClass spi;
+SX1276fsk radio(spi, RF_SS, RF_RESET); // ss and reset pins
+
+uint8_t rfId        = 63; // 61=tx-only node, 63=promisc node
+uint8_t rfGroup     = 6;
+uint32_t rfFreq     = 912500;
+int8_t rfPow        = 10;
 DV(rfId); DV(rfGroup); DV(rfFreq); DV(rfPow);
 
 #define BUTTON 0
@@ -59,17 +67,21 @@ void setup() {
 
     // radio init
     printf("Initializing radio\n");
-    pinMode(25, OUTPUT);
-    pinMode(27, OUTPUT);
-    spi.begin(32, 35, 33);
+    spi.begin(RF_CLK, RF_MISO, RF_MOSI);
     radio.init(rfId, rfGroup, rfFreq);
+    radio.setIntrPins(RF_DIO0, RF_DIO4);
     radio.txPower(rfPow);
+    radio.setMode(SX1276fsk::MODE_STANDBY);
 
+
+    pinMode(23, OUTPUT);
+    digitalWrite(23, LOW);
     printf("===== Setup complete\n");
 }
 
 uint32_t lastInfo = -1000000;
 bool wifiConn = false;
+uint32_t lastReport = -50*1000;
 
 void loop() {
     // print wifi/mqtt info every now and then
@@ -92,8 +104,34 @@ void loop() {
         printf("\n");
     }
 
+    if (millis() - lastReport > 4*1000) {
+        uint8_t pkt[50];
+        for (int i=0; i<50; i++) pkt[i] = i;
+        printf("Sending... ");
+        digitalWrite(23, HIGH);
+        bool sent = radio.send(0x80, pkt, 50);
+        if (sent) {
+            while (radio.transmitting()) delayMicroseconds(10);
+            radio.receive(pkt, sizeof(pkt));
+            digitalWrite(23, LOW);
+            uint32_t s = millis();
+            while (millis()-s < 30) {
+                int len = radio.receive(pkt, sizeof(pkt));
+                if (len > 0) {
+                    printf("Got %d byte ACK in %ldms!", len, millis()-s);
+                    break;
+                }
+            }
+            puts("");
+            lastReport = millis();
+            digitalWrite(23, HIGH);
+            delayMicroseconds(1000);
+            digitalWrite(23, LOW);
+        } else { puts("send failed"); }
+    }
+
     mqttLoop();
     cmd.loop();
 
-    delay(10);
+    //delay(10);
 }
