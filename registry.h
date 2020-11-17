@@ -12,16 +12,16 @@ using namespace std::placeholders;
 class NodeRegistry {
 public:
 
-    // doAck returns true if an ACK should be sent, false otherwise.
+    // shouldAck returns true if an ACK should be sent, false otherwise.
     // It essentially checks the margin info received from all the gw for the previous packet
-    bool doAck(uint32_t nodeId) {
+    bool shouldAck(uint32_t nodeId) {
         NodeEntry &e = nodes[nodeId]; // note: [] creates entry if it doesn't exist
         return e.gwId <= 0; // <0 => always reply to new nodes, may cause a collision...
     }
 
     // addInfo registers the margin info received from a gw.
     // It keeps track of the strongest signal, but replaces it if it is more than a few seconds old
-    // in an attempt to keep track of only the lasst packet data.
+    // in an attempt to keep track of only the last packet data.
     void addInfo(uint32_t nodeId, const char *gw, int margin) {
         int gwId = lookupGW(gw);
         NodeEntry &e = nodes[nodeId];
@@ -29,14 +29,16 @@ public:
             e.gwId = gwId;
             e.margin = margin;
             e.at = millis();
-            if (debug) printf("Node %08x reachable via GW %d with %ddB\n", nodeId, gwId, margin);
+            if (debug) printf("Node %08x reachable via GW %d(%s) with %ddB\n",
+                    nodeId, gwId, gw, margin);
         }
     }
 
-    bool debug = true;
+    bool debug = false;
 
 //private:
     const char *gateways[MAX_GW];       // index 0 = self
+    int baz = 0xdeadbeef;
     int numGW;
     uint32_t entryTimeout;              // timeout for the top entry, in ms
 
@@ -53,9 +55,11 @@ public:
         numGW = 1;
         entryTimeout = 5000;
     }
+    NodeRegistry() = delete;
 
     void setSelf(const char *selfGwName) {
         gateways[0] = selfGwName;
+        numGW = 1;
     }
 
     int lookupGW(const char *gwName) {
@@ -75,13 +79,14 @@ class NodeRegistryWorker {
 public:
     NodeRegistry registry;
 
+    NodeRegistryWorker() = delete;
     NodeRegistryWorker(const char *self, const char *gwTopic = "rfgw/reports",
             const char *ackTopic = "rfgw/acks")
         : registry(NodeRegistry(self))
         , gwTopic(gwTopic)
         , ackTopic(ackTopic)
         , selfGw(self)
-    {}
+    { }
 
     const char *gwTopic;
     const char *ackTopic;
@@ -93,6 +98,7 @@ public:
     {
         // Handle gw/node announcements
         if (len < 128 && len == total && strcmp(topic, gwTopic) == 0) {
+            if (registry.debug) { payload[len] = 0; printf("%s: %s\n", topic, payload); }
             DynamicJsonDocument json(256); // TODO: use JSON_OBJECT_SIZE, etc...
             DeserializationError err = deserializeJson(json, payload, len);
             if (err) {
@@ -117,23 +123,25 @@ public:
         printf("Subscribed to %s for NodeRegistry\n", gwTopic);
     }
 
-    bool doAck(uint32_t nodeId, int margin) {
+    bool shouldAck(uint32_t nodeId) {
         if (nodeId == 0) return false; // never ACK another GW's packet
-        bool ack = registry.doAck(nodeId);
+        return registry.shouldAck(nodeId);
+    }
+
+    void sendInfo(uint32_t nodeId, int margin, bool didAck) {
         char payload[128];
         snprintf(payload, 128, "{\"gw\":\"%s\",\"node\":%u,\"margin\":%d}", selfGw, nodeId, margin);
         uint16_t packetId = mqttClient.publish(gwTopic, 1, false, payload);
         if (registry.debug) printf("Pub to %s -> %d: %s\n", gwTopic, packetId, payload);
-        if (ack) {
+        if (didAck) {
             snprintf(payload, 128, "{\"gw\":\"%s\",\"node\":%d,\"ack\":true}", selfGw, nodeId);
             mqttClient.publish(gwTopic, 1, false, payload);
         }
-        return ack;
     }
 
     void setup() {
-        mqttClient.onConnect(std::bind(&NodeRegistryWorker::onMqttConnect, *this, _1));
-        mqttClient.onMessage(std::bind(&NodeRegistryWorker::onMqttMessage, *this,
+        mqttClient.onConnect(std::bind(&NodeRegistryWorker::onMqttConnect, this, _1));
+        mqttClient.onMessage(std::bind(&NodeRegistryWorker::onMqttMessage, this,
                     _1, _2, _3, _4, _5, _6));
     }
 };
